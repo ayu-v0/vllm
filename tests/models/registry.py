@@ -1491,6 +1491,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         is_available_online=False,
     ),
+    "Gemma4MTPModel": _HfExamplesInfo(
+        "google/gemma-4-31B-it",
+        speculative_model="google/gemma-4-31B-it-assistant",
+    ),
     "ErnieMTPModel": _HfExamplesInfo(
         "baidu/ERNIE-4.5-21B-A3B-PT",
         trust_remote_code=True,
