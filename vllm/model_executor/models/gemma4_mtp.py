@@ -470,10 +470,6 @@ class Gemma4MTP(nn.Module):
             "pre_projection.": "model.pre_projection.",
             "post_projection.": "model.post_projection.",
         },
-        orig_to_new_stacked={
-            ".gate_proj": (".gate_up_proj", 0),
-            ".up_proj": (".gate_up_proj", 1),
-        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -597,5 +593,30 @@ class Gemma4MTP(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         self._stable_full_lm_head_weight = None
+        stacked_params_mapping = [
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
+        ]
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        other_weights: list[tuple[str, torch.Tensor]] = []
+
+        for name, loaded_weight in self.hf_to_vllm_mapper.apply(weights):
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                stacked_name = name.replace(weight_name, param_name)
+                if stacked_name not in params_dict:
+                    continue
+                param = params_dict[stacked_name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                loaded_params.add(stacked_name)
+                break
+            else:
+                other_weights.append((name, loaded_weight))
+
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded_params.update(loader.load_weights(other_weights))
+        return loaded_params
