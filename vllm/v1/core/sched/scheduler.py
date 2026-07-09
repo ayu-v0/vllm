@@ -444,6 +444,25 @@ class Scheduler(SchedulerInterface):
                 )
 
             if num_new_tokens == 0:
+                if request.spec_token_ids or request.num_output_placeholders > 0:
+                    logger.warning(
+                        "Spec decode scheduler debug: request skipped with "
+                        "num_new_tokens=0. req_id=%s num_tokens=%s "
+                        "num_tokens_with_spec=%s num_output_tokens=%s "
+                        "num_output_placeholders=%s num_computed_tokens=%s "
+                        "num_prompt_tokens=%s max_tokens=%s spec_token_ids=%s "
+                        "token_budget=%s",
+                        request.request_id,
+                        request.num_tokens,
+                        request.num_tokens_with_spec,
+                        request.num_output_tokens,
+                        request.num_output_placeholders,
+                        request.num_computed_tokens,
+                        request.num_prompt_tokens,
+                        request.max_tokens,
+                        request.spec_token_ids,
+                        token_budget,
+                    )
                 # The request cannot be scheduled because one of the following
                 # reasons:
                 # 1. No new tokens to schedule. This may happen when
@@ -1367,6 +1386,31 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
+            if scheduled_spec_token_ids and not generated_token_ids:
+                old_num_computed_tokens = request.num_computed_tokens
+                request.num_computed_tokens = max(
+                    0, request.num_computed_tokens - num_tokens_scheduled
+                )
+                if request.num_output_placeholders > 0:
+                    request.num_output_placeholders = max(
+                        0,
+                        request.num_output_placeholders - num_tokens_scheduled,
+                    )
+                logger.warning(
+                    "Spec decode scheduler debug: empty generated tokens after "
+                    "scheduled draft validation; rolling back request state. "
+                    "req_id=%s num_tokens_scheduled=%s scheduled_spec_tokens=%s "
+                    "num_computed_tokens=%s->%s num_tokens=%s "
+                    "num_output_tokens=%s num_output_placeholders=%s",
+                    req_id,
+                    num_tokens_scheduled,
+                    scheduled_spec_token_ids,
+                    old_num_computed_tokens,
+                    request.num_computed_tokens,
+                    request.num_tokens,
+                    request.num_output_tokens,
+                    request.num_output_placeholders,
+                )
             if scheduled_spec_token_ids and generated_token_ids:
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_accepted = len(generated_token_ids) - 1

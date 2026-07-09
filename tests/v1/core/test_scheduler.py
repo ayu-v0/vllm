@@ -944,6 +944,14 @@ def test_spec_decoding_stats_empty_output():
     )
     assert scheduler_stats is None or scheduler_stats.spec_decoding_stats is None
 
+    # The request must not be left at the optimistic computed-token position.
+    # If it is, the next schedule sees no token gap and the request stays
+    # RUNNING forever.
+    assert request.num_computed_tokens == request.num_tokens - 1
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[req_id] == 1
+    assert req_id not in output.scheduled_spec_decode_tokens
+
 
 def test_no_spec_tokens_scheduled_for_prefill_chunks():
     """Test that draft tokens are ignored for prefill chunk requests.

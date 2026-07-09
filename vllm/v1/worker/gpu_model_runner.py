@@ -267,7 +267,19 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         This function blocks until the copy is finished.
         """
         max_gen_len = self.sampled_token_ids_cpu.shape[-1]
+        if getattr(self, "_gemma4_mtp_debug", False):
+            logger.warning(
+                "Gemma4 MTP debug: async get_output synchronize start "
+                "sampled_token_ids_cpu_shape=%s max_gen_len=%s "
+                "invalid_req_indices=%s logprobs_tensors_cpu=%s",
+                tuple(self.sampled_token_ids_cpu.shape),
+                max_gen_len,
+                self._invalid_req_indices,
+                self._logprobs_tensors_cpu is not None,
+            )
         self.async_copy_ready_event.synchronize()
+        if getattr(self, "_gemma4_mtp_debug", False):
+            logger.warning("Gemma4 MTP debug: async get_output synchronize done")
 
         # Release the device tensors once the copy has completed.
         del self._logprobs_tensors
@@ -290,6 +302,13 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
         output.logprobs = logprobs_lists
+        if getattr(self, "_gemma4_mtp_debug", False):
+            logger.warning(
+                "Gemma4 MTP debug: async get_output return "
+                "valid_sampled_token_ids_len=%s logprobs=%s",
+                len(valid_sampled_token_ids),
+                logprobs_lists is not None,
+            )
         return output
 
 
