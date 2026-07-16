@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import os
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
+from vllm.logger import init_logger
 from vllm.outputs import (
     STREAM_FINISHED,
     CompletionOutput,
@@ -37,6 +39,9 @@ from vllm.v1.metrics.stats import (
     RequestStateStats,
     SchedulerStats,
 )
+
+logger = init_logger(__name__)
+_GEMMA4_MTP_DEBUG = os.getenv("VLLM_ASCEND_GEMMA4_MTP_DEBUG") == "1"
 
 # shared empty CPU tensor used as a placeholder pooling output
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
@@ -618,6 +623,19 @@ class OutputProcessor:
             kv_transfer_params = engine_core_output.kv_transfer_params
             routed_experts = engine_core_output.routed_experts
 
+            if _GEMMA4_MTP_DEBUG:
+                logger.warning(
+                    "Gemma4 MTP debug: output processor received req_id=%s "
+                    "new_token_ids=%s finish_reason=%s stop_reason=%s "
+                    "engine_finished=%s output_kind=%s",
+                    req_id,
+                    new_token_ids,
+                    finish_reason,
+                    stop_reason,
+                    engine_core_output.finished,
+                    req_state.output_kind,
+                )
+
             if req_state.is_prefilling:
                 if engine_core_output.prefill_stats is not None:
                     req_state.num_cached_tokens = (
@@ -661,6 +679,14 @@ class OutputProcessor:
 
             # Free completed requests.
             if finish_reason is not None:
+                if _GEMMA4_MTP_DEBUG:
+                    logger.warning(
+                        "Gemma4 MTP debug: output processor finishing req_id=%s "
+                        "finish_reason=%s engine_finished=%s",
+                        req_id,
+                        finish_reason,
+                        engine_core_output.finished,
+                    )
                 if req_state.streaming_input:
                     if req_state.input_chunk_queue:
                         update = req_state.input_chunk_queue.popleft()

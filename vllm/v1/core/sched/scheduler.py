@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import os
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -62,6 +63,8 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+_GEMMA4_MTP_DEBUG = os.getenv("VLLM_ASCEND_GEMMA4_MTP_DEBUG") == "1"
 
 
 class Scheduler(SchedulerInterface):
@@ -1386,6 +1389,22 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
+            if _GEMMA4_MTP_DEBUG and scheduled_spec_token_ids:
+                logger.warning(
+                    "Gemma4 MTP debug: scheduler before update req_id=%s "
+                    "generated=%s scheduled_spec=%s max_tokens=%s "
+                    "num_output_tokens=%s num_tokens=%s "
+                    "num_computed_tokens=%s placeholders=%s status=%s",
+                    req_id,
+                    generated_token_ids,
+                    scheduled_spec_token_ids,
+                    request.max_tokens,
+                    request.num_output_tokens,
+                    request.num_tokens,
+                    request.num_computed_tokens,
+                    request.num_output_placeholders,
+                    request.status,
+                )
             if scheduled_spec_token_ids and not generated_token_ids:
                 old_num_computed_tokens = request.num_computed_tokens
                 request.num_computed_tokens = max(
@@ -1454,6 +1473,23 @@ class Scheduler(SchedulerInterface):
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
+
+            if _GEMMA4_MTP_DEBUG and scheduled_spec_token_ids:
+                logger.warning(
+                    "Gemma4 MTP debug: scheduler after update req_id=%s "
+                    "emitted=%s stopped=%s max_tokens=%s "
+                    "num_output_tokens=%s num_tokens=%s "
+                    "num_computed_tokens=%s placeholders=%s status=%s",
+                    req_id,
+                    new_token_ids,
+                    stopped,
+                    request.max_tokens,
+                    request.num_output_tokens,
+                    request.num_tokens,
+                    request.num_computed_tokens,
+                    request.num_output_placeholders,
+                    request.status,
+                )
 
             if new_token_ids and self.structured_output_manager.should_advance(request):
                 struct_output_request = request.structured_output_request
