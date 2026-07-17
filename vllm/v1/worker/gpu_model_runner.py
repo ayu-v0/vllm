@@ -234,6 +234,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         invalid_req_indices: list[int],
         async_output_copy_stream: torch.cuda.Stream,
         vocab_size: int,
+        valid_sampled_token_count: torch.Tensor | None = None,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
@@ -246,6 +247,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._sampled_token_ids = sampled_token_ids
         self.vocab_size = vocab_size
         self._logprobs_tensors = logprobs_tensors
+        self._valid_sampled_token_count = valid_sampled_token_count
 
         # Initiate the copy on a separate stream, but do not synchronize it.
         default_stream = torch.cuda.current_stream()
@@ -253,6 +255,11 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             async_output_copy_stream.wait_stream(default_stream)
             self.sampled_token_ids_cpu = self._sampled_token_ids.to(
                 "cpu", non_blocking=True
+            )
+            self.valid_sampled_token_count_cpu = (
+                self._valid_sampled_token_count.to("cpu", non_blocking=True)
+                if self._valid_sampled_token_count is not None
+                else None
             )
             self._logprobs_tensors_cpu = (
                 self._logprobs_tensors.to_cpu_nonblocking()
@@ -284,6 +291,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         # Release the device tensors once the copy has completed.
         del self._logprobs_tensors
         del self._sampled_token_ids
+        del self._valid_sampled_token_count
         if max_gen_len == 1:
             valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
             for i in self._invalid_req_indices:
@@ -297,6 +305,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 self.vocab_size,
                 self._invalid_req_indices,
                 logprobs_tensors=self._logprobs_tensors_cpu,
+                valid_sampled_token_count=self.valid_sampled_token_count_cpu,
             )
 
         output = self._model_runner_output

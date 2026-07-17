@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -249,6 +250,7 @@ class RejectionSampler(nn.Module):
         vocab_size: int,
         discard_req_indices: Sequence[int] = (),
         logprobs_tensors: LogprobsTensors | None = None,
+        valid_sampled_token_count: torch.Tensor | None = None,
     ) -> tuple[list[list[int]], LogprobsLists | None]:
         """Parse the output of the rejection sampler.
         Args:
@@ -259,22 +261,44 @@ class RejectionSampler(nn.Module):
             vocab_size: The size of the vocabulary.
             discard_req_indices: Optional row indices to discard tokens in.
             logprobs_tensors: Optional logprobs tensors to filter.
+            valid_sampled_token_count: Optional valid-token count for each
+                output row. When set, it must agree with the placeholder mask.
         Returns:
             A list of lists of token IDs.
         """
         output_token_ids_np = output_token_ids.cpu().numpy()
         # Create mask for valid tokens.
-        valid_mask = (output_token_ids_np != PLACEHOLDER_TOKEN_ID) & (
+        placeholder_mask = (output_token_ids_np != PLACEHOLDER_TOKEN_ID) & (
             output_token_ids_np < vocab_size
         )
+        if valid_sampled_token_count is None:
+            valid_mask = placeholder_mask
+        else:
+            valid_counts_np = valid_sampled_token_count.cpu().numpy()
+            batch_size, max_gen_len = output_token_ids_np.shape
+            if valid_counts_np.shape != (batch_size,):
+                raise RuntimeError(
+                    "valid sampled count shape does not match rejection output: "
+                    f"{valid_counts_np.shape} != ({batch_size},)"
+                )
+            if (valid_counts_np < 0).any() or (valid_counts_np > max_gen_len).any():
+                raise RuntimeError(
+                    "valid sampled count is outside rejection output bounds: "
+                    f"counts={valid_counts_np.tolist()}, max_gen_len={max_gen_len}"
+                )
+            count_mask = np.arange(max_gen_len)[None, :] < valid_counts_np[:, None]
+            if not np.array_equal(count_mask, placeholder_mask):
+                raise RuntimeError("valid sampled count disagrees with rejection output")
+            valid_mask = count_mask
+
+        if len(discard_req_indices) > 0:
+            valid_mask[discard_req_indices] = False
         output_logprobs = None
         if logprobs_tensors is not None:
             cu_num_tokens = [0] + valid_mask.sum(axis=1).cumsum().tolist()
             filtered_tensors = logprobs_tensors.filter(valid_mask.flatten())
             output_logprobs = filtered_tensors.tolists(cu_num_tokens)
 
-        if len(discard_req_indices) > 0:
-            valid_mask[discard_req_indices] = False
         outputs = [
             row[valid_mask[i]].tolist() for i, row in enumerate(output_token_ids_np)
         ]
