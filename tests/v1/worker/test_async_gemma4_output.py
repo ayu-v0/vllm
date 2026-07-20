@@ -12,6 +12,11 @@ from vllm.v1.worker import gpu_model_runner
 from vllm.v1.worker.gpu_model_runner import AsyncGPUModelRunnerOutput
 
 
+# These tests use CPU tensors and mocked CUDA stream objects only. The global
+# NPU allocator cleanup is neither needed nor compatible with torch_npu here.
+pytestmark = pytest.mark.skip_global_cleanup
+
+
 class _CopyStream:
     def wait_stream(self, _stream) -> None:
         pass

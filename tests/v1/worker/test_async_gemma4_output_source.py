@@ -1,6 +1,12 @@
 import ast
 from pathlib import Path
 
+import pytest
+
+
+# This file only parses source text and never allocates accelerator memory.
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 GPU_RUNNER_SOURCE = Path(__file__).parents[3] / "vllm" / "v1" / "worker" / "gpu_model_runner.py"
 REJECTION_SAMPLER_SOURCE = Path(__file__).parents[3] / "vllm" / "v1" / "sample" / "rejection_sampler.py"
