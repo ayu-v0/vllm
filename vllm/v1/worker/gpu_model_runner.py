@@ -2340,8 +2340,8 @@ class GPUModelRunner(
                     spec_decode_common_attn_metadata = cm
 
             if self.speculative_config and isinstance(self.drafter, Gemma4Proposer):
-                self.drafter.set_per_group_block_table(
-                    kv_cache_gid, cm.block_table_tensor
+                self.drafter.set_per_group_attention_metadata(
+                    kv_cache_gid, cm.block_table_tensor, cm.slot_mapping
                 )
 
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):

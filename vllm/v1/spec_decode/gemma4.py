@@ -49,6 +49,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         # Per-group block tables for multi-group KV cache models.
         # Populated by gpu_model_runner during _prepare_inputs.
         self._per_group_block_tables: dict[int, torch.Tensor] = {}
+        self._per_group_slot_mappings: dict[int, torch.Tensor] = {}
 
         # Centroids CUDA graphs — populated in load_model if centroids
         # masking is active. _centroids_sizes is pre-sorted for fast
@@ -60,6 +61,16 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
 
     def set_per_group_block_table(self, gid: int, block_table: torch.Tensor) -> None:
         self._per_group_block_tables[gid] = block_table
+
+    def set_per_group_attention_metadata(
+        self,
+        gid: int,
+        block_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        """Retain a matching target KV block table and slot mapping per group."""
+        self._per_group_block_tables[gid] = block_table
+        self._per_group_slot_mappings[gid] = slot_mapping
 
     def model_returns_tuple(self) -> bool:
         # forward() returns (draft_hidden_states, backbone_hidden_states).
@@ -84,13 +95,19 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         batch_size = common_attn_metadata.batch_size()
         for attn_group in self.draft_attn_groups:
             gid = attn_group.kv_cache_group_id
-            if gid in self._per_group_block_tables:
+            if (
+                gid in self._per_group_block_tables
+                or gid in self._per_group_slot_mappings
+            ):
                 cm = copy(common_attn_metadata)
                 # Slice to actual batch size to match cu_seqlens_q dimension.
                 # The stored block tables may be padded (num_reqs_padded) from
                 # the target forward pass, but the drafter operates on the
                 # unpadded batch.
-                cm.block_table_tensor = self._per_group_block_tables[gid][:batch_size]
+                if gid in self._per_group_block_tables:
+                    cm.block_table_tensor = self._per_group_block_tables[gid][:batch_size]
+                if gid in self._per_group_slot_mappings:
+                    cm.slot_mapping = self._per_group_slot_mappings[gid]
             else:
                 cm = common_attn_metadata
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
