@@ -235,9 +235,11 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         async_output_copy_stream: torch.cuda.Stream,
         vocab_size: int,
         valid_sampled_token_count: torch.Tensor | None = None,
+        profile_context: dict[str, float | int] | None = None,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
+        self._profile_context = profile_context
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
         self.async_copy_ready_event = torch.Event()
@@ -273,6 +275,8 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         This function blocks until the copy is finished.
         """
+        profile_context = self._profile_context
+        profile_start = time.perf_counter() if profile_context is not None else 0.0
         max_gen_len = self.sampled_token_ids_cpu.shape[-1]
         if getattr(self, "_gemma4_mtp_debug", False):
             logger.warning(
@@ -284,7 +288,10 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 self._invalid_req_indices,
                 self._logprobs_tensors_cpu is not None,
             )
+        wait_start = time.perf_counter() if profile_context is not None else 0.0
         self.async_copy_ready_event.synchronize()
+        if profile_context is not None:
+            profile_context["async_output_wait_ms"] = (time.perf_counter() - wait_start) * 1000.0
         if getattr(self, "_gemma4_mtp_debug", False):
             logger.warning("Gemma4 MTP debug: async get_output synchronize done")
 
@@ -311,6 +318,24 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
         output.logprobs = logprobs_lists
+        if profile_context is not None:
+            profile_context["async_output_parse_ms"] = (time.perf_counter() - profile_start) * 1000.0
+            logger.info(
+                "Gemma4 MTP async profile: output iteration=%s "
+                "async_output_wait_ms=%.3f async_output_parse_ms=%.3f "
+                "worker_prepare_ms=%.3f worker_forward_launch_ms=%.3f "
+                "worker_sampling_ms=%.3f worker_bookkeeping_ms=%.3f "
+                "worker_draft_ms=%.3f worker_output_launch_ms=%.3f",
+                profile_context.get("iteration"),
+                profile_context["async_output_wait_ms"],
+                profile_context["async_output_parse_ms"],
+                profile_context.get("prepare_input_ms", 0.0),
+                profile_context.get("forward_launch_ms", 0.0),
+                profile_context.get("sampling_ms", 0.0),
+                profile_context.get("bookkeeping_ms", 0.0),
+                profile_context.get("draft_ms", 0.0),
+                profile_context.get("async_output_launch_ms", 0.0),
+            )
         if getattr(self, "_gemma4_mtp_debug", False):
             logger.warning(
                 "Gemma4 MTP debug: async get_output return "

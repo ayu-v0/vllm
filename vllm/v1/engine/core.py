@@ -214,6 +214,22 @@ class EngineCore:
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
+        self._gemma4_mtp_async_profile_enabled = (
+            self.use_spec_decode
+            and os.getenv("VLLM_ASCEND_GEMMA4_MTP_ASYNC_PROFILE", "0") == "1"
+        )
+        try:
+            self._gemma4_mtp_async_profile_every = max(
+                1, int(os.getenv("VLLM_ASCEND_GEMMA4_MTP_ASYNC_PROFILE_EVERY", "64"))
+            )
+        except ValueError:
+            self._gemma4_mtp_async_profile_every = 64
+        self._gemma4_mtp_async_profile_iteration = 0
+        if self._gemma4_mtp_async_profile_enabled:
+            logger.info(
+                "Gemma4 MTP async profile enabled: first 8 steps and every %d steps.",
+                self._gemma4_mtp_async_profile_every,
+            )
 
         self.aborts_queue = queue.Queue[list[str]]()
 
@@ -399,6 +415,13 @@ class EngineCore:
         )
         self._iteration_index += 1
 
+    def _should_profile_gemma4_mtp_async_step(self) -> bool:
+        if not self._gemma4_mtp_async_profile_enabled:
+            return False
+        self._gemma4_mtp_async_profile_iteration += 1
+        iteration = self._gemma4_mtp_async_profile_iteration
+        return iteration <= 8 or iteration % self._gemma4_mtp_async_profile_every == 0
+
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -410,23 +433,49 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
+        profile_this_step = self._should_profile_gemma4_mtp_async_step()
+        step_start = time.perf_counter() if profile_this_step else 0.0
         scheduler_output = self.scheduler.schedule()
+        schedule_end = time.perf_counter() if profile_this_step else 0.0
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
+        execute_submit_end = time.perf_counter() if profile_this_step else 0.0
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
             self.log_error_detail(scheduler_output),
             self.log_iteration_details(scheduler_output),
         ):
+            model_wait_start = time.perf_counter() if profile_this_step else 0.0
             model_output = future.result()
+            model_wait_end = time.perf_counter() if profile_this_step else 0.0
             if model_output is None:
+                sample_start = time.perf_counter() if profile_this_step else 0.0
                 model_output = self.model_executor.sample_tokens(grammar_output)
+                sample_end = time.perf_counter() if profile_this_step else 0.0
+            else:
+                sample_start = model_wait_end
+                sample_end = model_wait_end
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
+        scheduler_update_start = time.perf_counter() if profile_this_step else 0.0
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        if profile_this_step:
+            logger.info(
+                "Gemma4 MTP async profile: engine iteration=%d async_scheduling=%s "
+                "schedule_ms=%.3f execute_submit_ms=%.3f model_wait_ms=%.3f "
+                "sample_ms=%.3f scheduler_update_ms=%.3f step_total_ms=%.3f",
+                self._gemma4_mtp_async_profile_iteration,
+                self.async_scheduling,
+                (schedule_end - step_start) * 1000.0,
+                (execute_submit_end - schedule_end) * 1000.0,
+                (model_wait_end - model_wait_start) * 1000.0,
+                (sample_end - sample_start) * 1000.0,
+                (time.perf_counter() - scheduler_update_start) * 1000.0,
+                (time.perf_counter() - step_start) * 1000.0,
+            )
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 

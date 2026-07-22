@@ -10,6 +10,7 @@ pytestmark = pytest.mark.skip_global_cleanup
 
 GPU_RUNNER_SOURCE = Path(__file__).parents[3] / "vllm" / "v1" / "worker" / "gpu_model_runner.py"
 REJECTION_SAMPLER_SOURCE = Path(__file__).parents[3] / "vllm" / "v1" / "sample" / "rejection_sampler.py"
+ENGINE_CORE_SOURCE = Path(__file__).parents[3] / "vllm" / "v1" / "engine" / "core.py"
 
 
 def _class_source(path: Path, class_name: str) -> str:
@@ -53,6 +54,27 @@ def test_rejection_parser_uses_count_mask_for_tokens_and_logprobs():
     assert "valid_mask[discard_req_indices] = False" in source
 
 
+def test_async_output_profiles_existing_copy_wait_without_extra_sync():
+    source = _class_source(GPU_RUNNER_SOURCE, "AsyncGPUModelRunnerOutput")
+
+    assert "profile_context: dict[str, float | int] | None = None" in source
+    assert "async_output_wait_ms" in source
+    assert "Gemma4 MTP async profile: output" in source
+    assert source.count("async_copy_ready_event.synchronize()") == 1
+
+
+def test_engine_core_profiles_scheduler_and_output_boundaries_when_enabled():
+    source = ENGINE_CORE_SOURCE.read_text(encoding="utf-8")
+
+    assert "VLLM_ASCEND_GEMMA4_MTP_ASYNC_PROFILE" in source
+    assert "Gemma4 MTP async profile: engine" in source
+    assert "schedule_ms" in source
+    assert "model_wait_ms" in source
+    assert "scheduler_update_ms" in source
+
+
 if __name__ == "__main__":
     test_async_output_owns_valid_count_snapshot()
     test_rejection_parser_uses_count_mask_for_tokens_and_logprobs()
+    test_async_output_profiles_existing_copy_wait_without_extra_sync()
+    test_engine_core_profiles_scheduler_and_output_boundaries_when_enabled()
