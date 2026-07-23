@@ -6,7 +6,12 @@ from collections import deque
 from concurrent.futures import Future
 from types import SimpleNamespace
 
+import pytest
+
 from vllm.v1.engine.core import EngineCore
+
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 class _Scheduler:
@@ -46,6 +51,7 @@ def _make_engine_core(*, batch_queue_size: int, has_requests: bool = False):
     engine_core.batch_queue = deque(maxlen=batch_queue_size)
     engine_core.batch_queue_size = batch_queue_size
     engine_core.is_ec_consumer = True
+    engine_core.is_pooling_model = False
     engine_core.scheduler = _Scheduler(has_requests=has_requests)
     engine_core.aborts_queue = queue.Queue()
     engine_core.vllm_config = SimpleNamespace(
