@@ -508,6 +508,11 @@ class EngineCore:
 
         batch_queue = self.batch_queue
         assert batch_queue is not None
+        profile_this_step = self._should_profile_gemma4_mtp_async_step()
+        step_start = time.perf_counter() if profile_this_step else 0.0
+        schedule_end = step_start
+        execute_submit_end = step_start
+        sample_submit_end = step_start
 
         # Try to schedule a new batch if the batch queue is not full, but
         # the scheduler may return an empty batch if all requests are scheduled.
@@ -518,10 +523,13 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
+            schedule_end = time.perf_counter() if profile_this_step else 0.0
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
                 )
+            execute_submit_end = time.perf_counter() if profile_this_step else 0.0
+            sample_submit_end = execute_submit_end
             if self.is_ec_consumer:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
@@ -538,6 +546,7 @@ class EngineCore:
                     future = self.model_executor.sample_tokens(
                         grammar_output, non_block=True
                     )
+                    sample_submit_end = time.perf_counter() if profile_this_step else 0.0
                 else:
                     # We need to defer sampling until we have processed the model output
                     # from the prior step.
@@ -553,6 +562,17 @@ class EngineCore:
                 ):
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
+                    if profile_this_step:
+                        logger.info(
+                            "Gemma4 MTP async profile: engine_batch_queue iteration=%d "
+                            "phase=enqueue schedule_ms=%.3f execute_submit_ms=%.3f "
+                            "sample_submit_ms=%.3f step_total_ms=%.3f",
+                            self._gemma4_mtp_async_profile_iteration,
+                            (schedule_end - step_start) * 1000.0,
+                            (execute_submit_end - schedule_end) * 1000.0,
+                            (sample_submit_end - execute_submit_end) * 1000.0,
+                            (time.perf_counter() - step_start) * 1000.0,
+                        )
                     return None, True
 
         elif not batch_queue:
@@ -567,7 +587,9 @@ class EngineCore:
             self.log_error_detail(scheduler_output),
             self.log_iteration_details(scheduler_output),
         ):
+            batch_wait_start = time.perf_counter() if profile_this_step else 0.0
             model_output = future.result()
+            batch_wait_end = time.perf_counter() if profile_this_step else 0.0
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
@@ -577,9 +599,11 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
+        scheduler_update_start = time.perf_counter() if profile_this_step else 0.0
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        scheduler_update_end = time.perf_counter() if profile_this_step else 0.0
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -604,6 +628,21 @@ class EngineCore:
             )
             future = self.model_executor.sample_tokens(grammar_output, non_block=True)
             batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
+
+        if profile_this_step:
+            logger.info(
+                "Gemma4 MTP async profile: engine_batch_queue iteration=%d "
+                "phase=dequeue schedule_ms=%.3f execute_submit_ms=%.3f "
+                "sample_submit_ms=%.3f batch_wait_ms=%.3f "
+                "scheduler_update_ms=%.3f step_total_ms=%.3f",
+                self._gemma4_mtp_async_profile_iteration,
+                (schedule_end - step_start) * 1000.0,
+                (execute_submit_end - schedule_end) * 1000.0,
+                (sample_submit_end - execute_submit_end) * 1000.0,
+                (batch_wait_end - batch_wait_start) * 1000.0,
+                (scheduler_update_end - scheduler_update_start) * 1000.0,
+                (time.perf_counter() - step_start) * 1000.0,
+            )
 
         return engine_core_outputs, model_executed
 

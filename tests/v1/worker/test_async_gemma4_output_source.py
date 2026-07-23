@@ -73,8 +73,18 @@ def test_engine_core_profiles_scheduler_and_output_boundaries_when_enabled():
     assert "scheduler_update_ms" in source
 
 
+def test_engine_core_profiles_batch_queue_boundaries_when_async_uses_it():
+    source = _method_source(ENGINE_CORE_SOURCE, "step_with_batch_queue")
+
+    assert "_should_profile_gemma4_mtp_async_step()" in source
+    assert "batch_wait_ms" in source
+    assert "Gemma4 MTP async profile: engine_batch_queue" in source
+    assert "scheduler_update_ms" in source
+
+
 if __name__ == "__main__":
     test_async_output_owns_valid_count_snapshot()
     test_rejection_parser_uses_count_mask_for_tokens_and_logprobs()
     test_async_output_profiles_existing_copy_wait_without_extra_sync()
     test_engine_core_profiles_scheduler_and_output_boundaries_when_enabled()
+    test_engine_core_profiles_batch_queue_boundaries_when_async_uses_it()
