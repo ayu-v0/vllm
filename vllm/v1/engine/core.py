@@ -571,6 +571,16 @@ class EngineCore:
         # Note that this is not blocking.
         assert len(batch_queue) < self.batch_queue_size
 
+        if profile_this_step and len(batch_queue) == 1:
+            head_future = batch_queue[-1][0]
+            logger.info(
+                "Gemma4 MTP async profile: engine_batch_queue iteration=%d "
+                "phase=completed_head_check enabled=%s head_done=%s",
+                self._gemma4_mtp_async_profile_iteration,
+                self._gemma4_mtp_completed_head_ttft_fix_enabled,
+                head_future.done(),
+            )
+
         if self._should_deliver_completed_gemma4_mtp_batch_head():
             future, scheduler_output, exec_model_fut = batch_queue[-1]
             if future.done():
