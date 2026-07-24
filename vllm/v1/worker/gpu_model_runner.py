@@ -236,10 +236,13 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         vocab_size: int,
         valid_sampled_token_count: torch.Tensor | None = None,
         profile_context: dict[str, float | int] | None = None,
+        debug_tensors: dict[str, torch.Tensor] | None = None,
+        debug_context: dict[str, object] | None = None,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
         self._profile_context = profile_context
+        self.debug_context = debug_context
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
         self.async_copy_ready_event = torch.Event()
@@ -250,6 +253,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self.vocab_size = vocab_size
         self._logprobs_tensors = logprobs_tensors
         self._valid_sampled_token_count = valid_sampled_token_count
+        self._debug_tensors = debug_tensors or {}
 
         # Initiate the copy on a separate stream, but do not synchronize it.
         default_stream = torch.cuda.current_stream()
@@ -268,6 +272,10 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 if self._logprobs_tensors
                 else None
             )
+            self.debug_tensors_cpu = {
+                name: tensor.to("cpu", non_blocking=True)
+                for name, tensor in self._debug_tensors.items()
+            }
             self.async_copy_ready_event.record()
 
     def get_output(self) -> ModelRunnerOutput:
@@ -295,10 +303,28 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         if getattr(self, "_gemma4_mtp_debug", False):
             logger.warning("Gemma4 MTP debug: async get_output synchronize done")
 
+        if self.debug_context is not None:
+            logger.warning(
+                "Async output debug snapshot: context=%s sampled=%s "
+                "valid_count=%s state=%s",
+                self.debug_context,
+                self.sampled_token_ids_cpu.tolist(),
+                (
+                    self.valid_sampled_token_count_cpu.tolist()
+                    if self.valid_sampled_token_count_cpu is not None
+                    else None
+                ),
+                {
+                    name: value.tolist()
+                    for name, value in self.debug_tensors_cpu.items()
+                },
+            )
+
         # Release the device tensors once the copy has completed.
         del self._logprobs_tensors
         del self._sampled_token_ids
         del self._valid_sampled_token_count
+        del self._debug_tensors
         if max_gen_len == 1:
             valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
             for i in self._invalid_req_indices:

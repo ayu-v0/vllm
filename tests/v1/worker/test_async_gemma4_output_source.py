@@ -63,6 +63,19 @@ def test_async_output_profiles_existing_copy_wait_without_extra_sync():
     assert source.count("async_copy_ready_event.synchronize()") == 1
 
 
+def test_async_output_debug_snapshots_are_parsed_after_copy_ready():
+    source = _class_source(GPU_RUNNER_SOURCE, "AsyncGPUModelRunnerOutput")
+
+    assert "debug_tensors: dict[str, torch.Tensor] | None = None" in source
+    assert "debug_context: dict[str, object] | None = None" in source
+    assert "self.debug_tensors_cpu" in source
+    synchronize_pos = source.index("async_copy_ready_event.synchronize()")
+    sampled_tolist_pos = source.index("self.sampled_token_ids_cpu.tolist()")
+    debug_tolist_pos = source.index("value.tolist()")
+    assert synchronize_pos < sampled_tolist_pos
+    assert synchronize_pos < debug_tolist_pos
+
+
 def test_engine_core_profiles_scheduler_and_output_boundaries_when_enabled():
     source = ENGINE_CORE_SOURCE.read_text(encoding="utf-8")
 
@@ -86,5 +99,6 @@ if __name__ == "__main__":
     test_async_output_owns_valid_count_snapshot()
     test_rejection_parser_uses_count_mask_for_tokens_and_logprobs()
     test_async_output_profiles_existing_copy_wait_without_extra_sync()
+    test_async_output_debug_snapshots_are_parsed_after_copy_ready()
     test_engine_core_profiles_scheduler_and_output_boundaries_when_enabled()
     test_engine_core_profiles_batch_queue_boundaries_when_async_uses_it()

@@ -153,3 +153,24 @@ def test_async_outputs_own_independent_sampled_token_and_count_snapshots(fake_as
     assert result_a.sampled_token_ids == [[101, 0]]
     assert result_b.req_ids == ["request-b"]
     assert result_b.sampled_token_ids == [[11, 12, 13, 14]]
+
+
+def test_async_output_owns_debug_tensor_snapshots(fake_async_copy):
+    debug_device = _DeviceTensor(torch.tensor([10, 20, 30]))
+    output = AsyncGPUModelRunnerOutput(
+        _make_model_runner_output("request-a"),
+        _DeviceTensor(torch.tensor([[101, -1, -1, -1]])),
+        None,
+        [],
+        fake_async_copy,
+        vocab_size=1024,
+        valid_sampled_token_count=_DeviceTensor(torch.tensor([1])),
+        debug_tensors={"num_computed_after": debug_device},
+        debug_context={"trace_id": 7, "req_ids": ["request-a"]},
+    )
+
+    debug_device.tensor.fill_(-1)
+    result = output.get_output()
+
+    assert result.sampled_token_ids == [[101]]
+    assert output.debug_tensors_cpu["num_computed_after"].tolist() == [10, 20, 30]
