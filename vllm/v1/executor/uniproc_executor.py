@@ -38,6 +38,7 @@ class UniProcExecutor(Executor):
         )
 
         self.async_output_thread: ThreadPoolExecutor | None = None
+        self.worker_command_thread: ThreadPoolExecutor | None = None
         if self.max_concurrent_batches > 1:
             self.async_output_thread = ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="WorkerAsyncOutput"
@@ -51,6 +52,26 @@ class UniProcExecutor(Executor):
         else:
             self.driver_worker.load_model()
         current_platform.update_block_size_for_backend(self.vllm_config)
+
+        if self._should_enable_gemma4_mtp_async_uniproc_submit():
+            self.worker_command_thread = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="WorkerCommand",
+                initializer=current_platform.set_device,
+                initargs=(self.vllm_config.device_config.device,),
+            )
+
+    def _should_enable_gemma4_mtp_async_uniproc_submit(self) -> bool:
+        speculative_config = self.vllm_config.speculative_config
+        return (
+            type(self) is UniProcExecutor
+            and os.getenv("VLLM_ASCEND_GEMMA4_MTP_ASYNC_UNIPROC_SUBMIT", "0") == "1"
+            and self.vllm_config.scheduler_config.async_scheduling
+            and self.vllm_config.device_config.device_type == "npu"
+            and speculative_config is not None
+            and speculative_config.method == "mtp"
+            and self.vllm_config.model_config.hf_config.model_type == "gemma4"
+        )
 
     def _distributed_args(self) -> tuple[str, int, int]:
         """Return (distributed_init_method, rank, local_rank)."""
@@ -75,6 +96,48 @@ class UniProcExecutor(Executor):
     ) -> Any:
         if kwargs is None:
             kwargs = {}
+
+        if non_block and (command_thread := self.worker_command_thread) is not None:
+            public_future = Future[Any]()
+            command_future = command_thread.submit(
+                run_method, self.driver_worker, method, args, kwargs
+            )
+
+            def complete_public_future(completed_future: Future[Any]) -> None:
+                if public_future.done():
+                    return
+                try:
+                    result = completed_future.result()
+                    result = result if single_value else [result]
+                    public_future.set_result(result)
+                except Exception as error:
+                    public_future.set_exception(error)
+
+            def command_done(completed_future: Future[Any]) -> None:
+                if public_future.done():
+                    return
+                try:
+                    result = completed_future.result()
+                except Exception as error:
+                    public_future.set_exception(error)
+                    return
+
+                if isinstance(result, AsyncModelRunnerOutput):
+                    if (async_thread := self.async_output_thread) is not None:
+                        output_future = async_thread.submit(result.get_output)
+                        output_future.add_done_callback(complete_public_future)
+                        return
+                    try:
+                        result = result.get_output()
+                    except Exception as error:
+                        public_future.set_exception(error)
+                        return
+
+                result = result if single_value else [result]
+                public_future.set_result(result)
+
+            command_future.add_done_callback(command_done)
+            return public_future
 
         if not non_block:
             result = run_method(self.driver_worker, method, args, kwargs)
@@ -133,7 +196,13 @@ class UniProcExecutor(Executor):
         return
 
     def shutdown(self) -> None:
-        if worker := self.driver_worker:
+        if command_thread := getattr(self, "worker_command_thread", None):
+            command_thread.shutdown(wait=True)
+            self.worker_command_thread = None
+        if output_thread := getattr(self, "async_output_thread", None):
+            output_thread.shutdown(wait=True)
+            self.async_output_thread = None
+        if worker := getattr(self, "driver_worker", None):
             worker.shutdown()
 
     @classmethod

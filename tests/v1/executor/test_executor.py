@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Event
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,6 +22,7 @@ from vllm.v1.executor.uniproc_executor import (
     ExecutorWithExternalLauncher,
     UniProcExecutor,
 )
+from vllm.v1.outputs import AsyncModelRunnerOutput
 
 
 class Mock: ...
@@ -60,14 +62,78 @@ class RecordingUniProcWorker:
         return f"sample:{batch}"
 
 
+class BlockingAsyncOutput(AsyncModelRunnerOutput):
+    def __init__(self, started: Event, release: Event):
+        self.started = started
+        self.release = release
+
+    def get_output(self):
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise RuntimeError("test did not release the async output")
+        return "async-output"
+
+
+class AsyncOutputUniProcWorker:
+    def __init__(self, output: BlockingAsyncOutput):
+        self.output = output
+        self.calls: list[str] = []
+
+    def async_method(self):
+        self.calls.append("async_method")
+        return self.output
+
+    def fast_method(self):
+        self.calls.append("fast_method")
+        return "fast-result"
+
+
+class ShutdownRecorder:
+    def __init__(self, name: str, calls: list[str]):
+        self.name = name
+        self.calls = calls
+
+    def shutdown(self, wait: bool = True):
+        self.calls.append(self.name)
+
+
+class ShutdownWorker:
+    def __init__(self, calls: list[str]):
+        self.calls = calls
+
+    def shutdown(self):
+        self.calls.append("worker")
+
+
 def _bare_uniproc_executor(
-    worker: object, worker_command_thread: ThreadPoolExecutor
+    worker: object,
+    worker_command_thread: ThreadPoolExecutor,
+    async_output_thread: ThreadPoolExecutor | None = None,
 ) -> UniProcExecutor:
     executor = object.__new__(UniProcExecutor)
     executor.driver_worker = worker
-    executor.async_output_thread = None
+    executor.async_output_thread = async_output_thread
     executor.worker_command_thread = worker_command_thread
     return executor
+
+
+def _uniproc_gate_config(
+    *,
+    async_scheduling: bool = True,
+    device_type: str = "npu",
+    method: str | None = "mtp",
+    model_type: str = "gemma4",
+):
+    return SimpleNamespace(
+        scheduler_config=SimpleNamespace(async_scheduling=async_scheduling),
+        device_config=SimpleNamespace(device_type=device_type, device="npu:0"),
+        speculative_config=(
+            SimpleNamespace(method=method) if method is not None else None
+        ),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type=model_type)
+        ),
+    )
 
 
 def test_supports_async_scheduling_base_executor():
@@ -134,6 +200,35 @@ def test_uniproc_non_block_propagates_worker_exception():
 
 
 @pytest.mark.skip_global_cleanup
+def test_uniproc_non_block_hands_async_output_to_output_thread():
+    output_started = Event()
+    output_release = Event()
+    output = BlockingAsyncOutput(output_started, output_release)
+    worker = AsyncOutputUniProcWorker(output)
+
+    with (
+        ThreadPoolExecutor(max_workers=1) as command_thread,
+        ThreadPoolExecutor(max_workers=1) as output_thread,
+    ):
+        executor = _bare_uniproc_executor(worker, command_thread, output_thread)
+
+        output_future = executor.collective_rpc(
+            "async_method", non_block=True, single_value=True
+        )
+        assert output_started.wait(timeout=1), "async output did not start"
+        assert not output_future.done()
+
+        fast_future = executor.collective_rpc(
+            "fast_method", non_block=True, single_value=True
+        )
+        assert fast_future.result(timeout=1) == "fast-result"
+        assert worker.calls == ["async_method", "fast_method"]
+
+        output_release.set()
+        assert output_future.result(timeout=1) == "async-output"
+
+
+@pytest.mark.skip_global_cleanup
 def test_uniproc_non_block_preserves_execute_sample_submission_order():
     worker = RecordingUniProcWorker()
     with ThreadPoolExecutor(max_workers=1) as command_thread:
@@ -158,6 +253,45 @@ def test_uniproc_non_block_preserves_execute_sample_submission_order():
             ("execute_model", "B2"),
             ("sample_tokens", "B2"),
         ]
+
+
+@pytest.mark.skip_global_cleanup
+def test_uniproc_non_block_gate_is_default_off_and_scoped(monkeypatch):
+    executor = object.__new__(UniProcExecutor)
+    executor.vllm_config = _uniproc_gate_config()
+
+    monkeypatch.delenv("VLLM_ASCEND_GEMMA4_MTP_ASYNC_UNIPROC_SUBMIT", raising=False)
+    assert not executor._should_enable_gemma4_mtp_async_uniproc_submit()
+
+    monkeypatch.setenv("VLLM_ASCEND_GEMMA4_MTP_ASYNC_UNIPROC_SUBMIT", "1")
+    assert executor._should_enable_gemma4_mtp_async_uniproc_submit()
+
+    for config in (
+        _uniproc_gate_config(async_scheduling=False),
+        _uniproc_gate_config(device_type="cuda"),
+        _uniproc_gate_config(method=None),
+        _uniproc_gate_config(method="ngram"),
+        _uniproc_gate_config(model_type="qwen3"),
+    ):
+        executor.vllm_config = config
+        assert not executor._should_enable_gemma4_mtp_async_uniproc_submit()
+
+    external_executor = object.__new__(ExecutorWithExternalLauncher)
+    external_executor.vllm_config = _uniproc_gate_config()
+    assert not external_executor._should_enable_gemma4_mtp_async_uniproc_submit()
+
+
+@pytest.mark.skip_global_cleanup
+def test_uniproc_shutdown_orders_command_output_worker():
+    calls: list[str] = []
+    executor = object.__new__(UniProcExecutor)
+    executor.worker_command_thread = ShutdownRecorder("command", calls)
+    executor.async_output_thread = ShutdownRecorder("output", calls)
+    executor.driver_worker = ShutdownWorker(calls)
+
+    executor.shutdown()
+
+    assert calls == ["command", "output", "worker"]
 
 
 class CustomMultiprocExecutor(MultiprocExecutor):
