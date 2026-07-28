@@ -88,6 +88,7 @@ def test_supports_async_scheduling_multiproc_executor():
     assert MultiprocExecutor.supports_async_scheduling() is True
 
 
+@pytest.mark.skip_global_cleanup
 def test_uniproc_non_block_returns_before_worker_method_finishes():
     started = Event()
     release = Event()
@@ -119,6 +120,7 @@ def test_uniproc_non_block_returns_before_worker_method_finishes():
         command_thread.shutdown(wait=True, cancel_futures=True)
 
 
+@pytest.mark.skip_global_cleanup
 def test_uniproc_non_block_propagates_worker_exception():
     with ThreadPoolExecutor(max_workers=1) as command_thread:
         executor = _bare_uniproc_executor(FailingUniProcWorker(), command_thread)
@@ -131,6 +133,7 @@ def test_uniproc_non_block_propagates_worker_exception():
             result_future.result(timeout=1)
 
 
+@pytest.mark.skip_global_cleanup
 def test_uniproc_non_block_preserves_execute_sample_submission_order():
     worker = RecordingUniProcWorker()
     with ThreadPoolExecutor(max_workers=1) as command_thread:
