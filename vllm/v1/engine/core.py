@@ -214,15 +214,6 @@ class EngineCore:
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
-        self._gemma4_mtp_completed_head_ttft_fix_enabled = (
-            os.getenv("VLLM_ASCEND_GEMMA4_MTP_COMPLETED_HEAD_TTFT_FIX", "0")
-            == "1"
-            and self.async_scheduling
-            and vllm_config.device_config.device_type == "npu"
-            and vllm_config.speculative_config is not None
-            and vllm_config.speculative_config.method == "mtp"
-            and vllm_config.model_config.hf_config.model_type == "gemma4"
-        )
         self._gemma4_mtp_async_profile_enabled = (
             self.use_spec_decode
             and os.getenv("VLLM_ASCEND_GEMMA4_MTP_ASYNC_PROFILE", "0") == "1"
@@ -431,14 +422,6 @@ class EngineCore:
         iteration = self._gemma4_mtp_async_profile_iteration
         return iteration <= 8 or iteration % self._gemma4_mtp_async_profile_every == 0
 
-    def _should_deliver_completed_gemma4_mtp_batch_head(self) -> bool:
-        batch_queue = self.batch_queue
-        return (
-            self._gemma4_mtp_completed_head_ttft_fix_enabled
-            and batch_queue is not None
-            and len(batch_queue) == 1
-        )
-
     def _consume_batch_queue_output(
         self,
         future: Future[ModelRunnerOutput],
@@ -570,44 +553,6 @@ class EngineCore:
         # the scheduler may return an empty batch if all requests are scheduled.
         # Note that this is not blocking.
         assert len(batch_queue) < self.batch_queue_size
-
-        if profile_this_step and len(batch_queue) == 1:
-            head_future = batch_queue[-1][0]
-            logger.info(
-                "Gemma4 MTP async profile: engine_batch_queue iteration=%d "
-                "phase=completed_head_check enabled=%s head_done=%s",
-                self._gemma4_mtp_async_profile_iteration,
-                self._gemma4_mtp_completed_head_ttft_fix_enabled,
-                head_future.done(),
-            )
-
-        if self._should_deliver_completed_gemma4_mtp_batch_head():
-            future, scheduler_output, exec_model_fut = batch_queue[-1]
-            if future.done():
-                batch_queue.pop()
-                engine_core_outputs, batch_wait_ms, scheduler_update_ms = (
-                    self._consume_batch_queue_output(
-                        future,
-                        scheduler_output,
-                        exec_model_fut,
-                        profile_this_step=profile_this_step,
-                    )
-                )
-                if profile_this_step:
-                    logger.info(
-                        "Gemma4 MTP async profile: engine_batch_queue iteration=%d "
-                        "phase=completed_head queue_len=1 batch_wait_ms=%.3f "
-                        "scheduler_update_ms=%.3f step_total_ms=%.3f",
-                        self._gemma4_mtp_async_profile_iteration,
-                        batch_wait_ms,
-                        scheduler_update_ms,
-                        (time.perf_counter() - step_start) * 1000.0,
-                    )
-                return (
-                    engine_core_outputs,
-                    self.is_ec_consumer
-                    and scheduler_output.total_num_scheduled_tokens > 0,
-                )
 
         model_executed = False
         deferred_scheduler_output = None
