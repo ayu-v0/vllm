@@ -4,7 +4,8 @@
 import asyncio
 import os
 from collections.abc import Callable
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
+from threading import Event
 from typing import Any
 
 import pytest
@@ -25,6 +26,50 @@ from vllm.v1.executor.uniproc_executor import (
 class Mock: ...
 
 
+class BlockingUniProcWorker:
+    def __init__(self, started: Event, release: Event):
+        self.started = started
+        self.release = release
+
+    def slow_method(self):
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise RuntimeError("test did not release the blocking worker")
+        return "worker-result"
+
+
+class UniProcWorkerFailure(RuntimeError):
+    pass
+
+
+class FailingUniProcWorker:
+    def fail(self):
+        raise UniProcWorkerFailure("worker failed")
+
+
+class RecordingUniProcWorker:
+    def __init__(self):
+        self.calls: list[tuple[str, object]] = []
+
+    def execute_model(self, batch: object):
+        self.calls.append(("execute_model", batch))
+        return f"execute:{batch}"
+
+    def sample_tokens(self, batch: object):
+        self.calls.append(("sample_tokens", batch))
+        return f"sample:{batch}"
+
+
+def _bare_uniproc_executor(
+    worker: object, worker_command_thread: ThreadPoolExecutor
+) -> UniProcExecutor:
+    executor = object.__new__(UniProcExecutor)
+    executor.driver_worker = worker
+    executor.async_output_thread = None
+    executor.worker_command_thread = worker_command_thread
+    return executor
+
+
 def test_supports_async_scheduling_base_executor():
     assert Executor.supports_async_scheduling() is False
 
@@ -41,6 +86,75 @@ def test_supports_async_scheduling_executor_with_external_launcher():
 
 def test_supports_async_scheduling_multiproc_executor():
     assert MultiprocExecutor.supports_async_scheduling() is True
+
+
+def test_uniproc_non_block_returns_before_worker_method_finishes():
+    started = Event()
+    release = Event()
+    worker = BlockingUniProcWorker(started, release)
+    command_thread = ThreadPoolExecutor(max_workers=1)
+    caller_thread = ThreadPoolExecutor(max_workers=1)
+    executor = _bare_uniproc_executor(worker, command_thread)
+
+    try:
+        submitted_call = caller_thread.submit(
+            executor.collective_rpc,
+            "slow_method",
+            non_block=True,
+            single_value=True,
+        )
+        assert started.wait(timeout=1), "worker method did not start"
+
+        try:
+            result_future = submitted_call.result(timeout=0.05)
+            assert isinstance(result_future, Future)
+            assert not result_future.done()
+        finally:
+            release.set()
+
+        assert result_future.result(timeout=1) == "worker-result"
+    finally:
+        release.set()
+        caller_thread.shutdown(wait=True, cancel_futures=True)
+        command_thread.shutdown(wait=True, cancel_futures=True)
+
+
+def test_uniproc_non_block_propagates_worker_exception():
+    with ThreadPoolExecutor(max_workers=1) as command_thread:
+        executor = _bare_uniproc_executor(FailingUniProcWorker(), command_thread)
+
+        result_future = executor.collective_rpc(
+            "fail", non_block=True, single_value=True
+        )
+
+        with pytest.raises(UniProcWorkerFailure, match="worker failed"):
+            result_future.result(timeout=1)
+
+
+def test_uniproc_non_block_preserves_execute_sample_submission_order():
+    worker = RecordingUniProcWorker()
+    with ThreadPoolExecutor(max_workers=1) as command_thread:
+        executor = _bare_uniproc_executor(worker, command_thread)
+
+        futures = [
+            executor.execute_model("B1", non_block=True),
+            executor.sample_tokens("B1", non_block=True),
+            executor.execute_model("B2", non_block=True),
+            executor.sample_tokens("B2", non_block=True),
+        ]
+
+        assert [future.result(timeout=1) for future in futures] == [
+            "execute:B1",
+            "sample:B1",
+            "execute:B2",
+            "sample:B2",
+        ]
+        assert worker.calls == [
+            ("execute_model", "B1"),
+            ("sample_tokens", "B1"),
+            ("execute_model", "B2"),
+            ("sample_tokens", "B2"),
+        ]
 
 
 class CustomMultiprocExecutor(MultiprocExecutor):
