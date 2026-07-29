@@ -51,7 +51,12 @@ def test_rejection_parser_uses_count_mask_for_tokens_and_logprobs():
     assert "count_mask" in source
     assert "np.array_equal" in source
     assert "valid_mask.flatten()" in source
+    assert "placeholder_mask[discard_req_indices] = False" in source
+    assert "count_mask[discard_req_indices] = False" in source
     assert "valid_mask[discard_req_indices] = False" in source
+    assert source.index("count_mask[discard_req_indices] = False") < source.index(
+        "np.array_equal"
+    )
 
 
 def test_async_output_profiles_existing_copy_wait_without_extra_sync():

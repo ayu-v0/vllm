@@ -102,7 +102,7 @@ def test_parse_output_keeps_logprobs_aligned_for_mixed_rows():
         vocab_size=1024,
         discard_req_indices=[2],
         logprobs_tensors=logprobs_tensors,
-        valid_sampled_token_count=torch.tensor([2, 4, 1]),
+        valid_sampled_token_count=torch.tensor([2, 4, 0]),
     )
 
     assert output == [[101, 0], [11, 12, 13, 14], []]

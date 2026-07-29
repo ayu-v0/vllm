@@ -287,6 +287,9 @@ class RejectionSampler(nn.Module):
                     f"counts={valid_counts_np.tolist()}, max_gen_len={max_gen_len}"
                 )
             count_mask = np.arange(max_gen_len)[None, :] < valid_counts_np[:, None]
+            if len(discard_req_indices) > 0:
+                placeholder_mask[discard_req_indices] = False
+                count_mask[discard_req_indices] = False
             if not np.array_equal(count_mask, placeholder_mask):
                 raise RuntimeError("valid sampled count disagrees with rejection output")
             valid_mask = count_mask
