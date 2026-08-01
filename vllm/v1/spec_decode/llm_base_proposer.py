@@ -105,6 +105,10 @@ class SpecDecodeBaseProposer:
         )
         self.needs_extra_input_slots = self.net_num_new_slots_per_request > 0
 
+        # When True, all serial draft steps reuse the same real-request
+        # positions instead of advancing them between draft iterations.
+        self.constant_draft_positions: bool = False
+
         self.parallel_drafting_token_id: int = 0
         self.parallel_drafting_hidden_state_tensor: torch.Tensor | None = None
         if self.parallel_drafting:
@@ -368,6 +372,17 @@ class SpecDecodeBaseProposer:
             if self.vllm_config.model_config.uses_mrope:
                 positions = positions[0]
             self.positions[:num_tokens] = positions
+
+    def _prepare_constant_draft_positions(
+        self,
+        positions: torch.Tensor,
+        batch_size: int,
+        input_batch_size: int,
+    ) -> None:
+        """Compact real positions and initialize padded rows safely."""
+        self.positions[:batch_size].copy_(positions)
+        if input_batch_size > batch_size:
+            self.positions[batch_size:input_batch_size].zero_()
 
     def _get_slot_mapping(
         self,
