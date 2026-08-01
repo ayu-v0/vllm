@@ -27,13 +27,19 @@ from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backend import (
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.tree_attn import (
     TreeAttentionMetadata,
     TreeAttentionMetadataBuilder,
 )
-from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
+from vllm.v1.attention.backends.triton_attn import (
+    TritonAttentionMetadata,
+    TritonAttentionMetadataBuilder,
+)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -383,6 +389,20 @@ class SpecDecodeBaseProposer:
         self.positions[:batch_size].copy_(positions)
         if input_batch_size > batch_size:
             self.positions[batch_size:input_batch_size].zero_()
+
+    def _can_reuse_followup_attn_metadata(self) -> bool:
+        """Return whether all draft groups have reusable Triton metadata."""
+        if not self.constant_draft_positions or not self.draft_attn_groups:
+            return False
+        for attn_group in self.draft_attn_groups:
+            builder = attn_group.get_metadata_builder()
+            if (
+                type(builder) is not TritonAttentionMetadataBuilder
+                or type(builder).build_for_drafting
+                is not AttentionMetadataBuilder.build_for_drafting
+            ):
+                return False
+        return True
 
     def _get_slot_mapping(
         self,
