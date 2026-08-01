@@ -12,6 +12,7 @@ import vllm.v1.spec_decode.llm_base_proposer as proposer_module
 from vllm.config import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilder
+from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 
 
@@ -45,6 +46,45 @@ class _FakeCommonMetadata:
 
     def batch_size(self) -> int:
         return self.seq_lens.shape[0]
+
+
+class _RecordingBuilder:
+    def __init__(self):
+        self.calls = []
+
+    def build_for_drafting(
+        self,
+        *,
+        common_attn_metadata,
+        draft_index,
+    ):
+        record = SimpleNamespace(
+            draft_index=draft_index,
+            metadata=common_attn_metadata,
+            block_table=common_attn_metadata.block_table_tensor.clone(),
+            slot_mapping=common_attn_metadata.slot_mapping.clone(),
+        )
+        self.calls.append(record)
+        return record
+
+
+class _GemmaGroup:
+    def __init__(self, gid, layer_name, builder):
+        self.kv_cache_group_id = gid
+        self.layer_names = [layer_name]
+        self.builder = builder
+
+    def get_metadata_builder(self):
+        return self.builder
+
+
+class _GemmaCommonMetadata:
+    def __init__(self):
+        self.block_table_tensor = torch.full((2, 2), -1)
+        self.slot_mapping = torch.full((4,), -1)
+
+    def batch_size(self):
+        return 2
 
 
 def _bare_proposer(
@@ -459,3 +499,69 @@ def test_update_positions_dependent_metadata_preserves_normal_behavior(
         proposer._slot_mapping_buffer[2:4],
         torch.tensor([-1, -1]),
     )
+
+
+def test_gemma4_metadata_keeps_group_alignment_and_draft_index():
+    proposer = object.__new__(Gemma4Proposer)
+    builder0 = _RecordingBuilder()
+    builder1 = _RecordingBuilder()
+    proposer.draft_attn_groups = [
+        _GemmaGroup(0, "layer.sliding", builder0),
+        _GemmaGroup(1, "layer.full", builder1),
+    ]
+    proposer._per_group_block_tables = {
+        0: torch.tensor([[10, 11], [30, 31], [90, 91]]),
+        1: torch.tensor([[20, 21], [40, 41], [80, 81]]),
+    }
+    proposer._per_group_slot_mappings = {
+        0: torch.tensor([100, 300, -1, -1]),
+        1: torch.tensor([200, 400, -1, -1]),
+    }
+    common = _GemmaCommonMetadata()
+    original_block_table = common.block_table_tensor.clone()
+    original_slot_mapping = common.slot_mapping.clone()
+
+    for draft_index in (1, 2):
+        per_group, per_layer = proposer.build_per_group_and_layer_attn_metadata(
+            common,
+            draft_index=draft_index,
+        )
+        assert len(per_group) == 2
+        assert per_group[0] is builder0.calls[-1]
+        assert per_group[1] is builder1.calls[-1]
+        assert per_layer["layer.sliding"].draft_index == draft_index
+        assert per_layer["layer.full"].draft_index == draft_index
+        assert per_layer["layer.sliding"] is builder0.calls[-1]
+        assert per_layer["layer.full"] is builder1.calls[-1]
+        assert builder0.calls[-1].metadata is not common
+        assert builder1.calls[-1].metadata is not common
+        assert builder0.calls[-1].metadata is not builder1.calls[-1].metadata
+        torch.testing.assert_close(
+            common.block_table_tensor,
+            original_block_table,
+        )
+        torch.testing.assert_close(
+            common.slot_mapping,
+            original_slot_mapping,
+        )
+
+    assert [call.draft_index for call in builder0.calls] == [1, 2]
+    assert [call.draft_index for call in builder1.calls] == [1, 2]
+    for call in builder0.calls:
+        torch.testing.assert_close(
+            call.block_table,
+            torch.tensor([[10, 11], [30, 31]]),
+        )
+        torch.testing.assert_close(
+            call.slot_mapping,
+            torch.tensor([100, 300, -1, -1]),
+        )
+    for call in builder1.calls:
+        torch.testing.assert_close(
+            call.block_table,
+            torch.tensor([[20, 21], [40, 41]]),
+        )
+        torch.testing.assert_close(
+            call.slot_mapping,
+            torch.tensor([200, 400, -1, -1]),
+        )
