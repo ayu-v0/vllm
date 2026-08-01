@@ -723,15 +723,26 @@ def test_eagle_correctness_heavy(
     [
         (("mtp", "XiaomiMiMo/MiMo-7B-Base", 1), False, 0.5),  # ref: 65%-70%
         (("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1), False, 0.0),  # dummy model
+        (
+            (
+                "mtp",
+                "google/gemma-4-E4B-it",
+                1,
+                "google/gemma-4-E4B-it-assistant",
+                3,
+            ),
+            False,
+            0.50,
+        ),
     ],
-    ids=["mimo", "deepseek"],
+    ids=["mimo", "deepseek", "gemma4-e4b"],
 )
 @single_gpu_only
 @large_gpu_mark(min_gb=20)
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
-    model_setup: tuple[str, str, int],
+    model_setup: tuple[str, str, int] | tuple[str, str, int, str, int],
     mm_enabled: bool,
     expected_accuracy_threshold: float,
 ):
@@ -747,8 +758,36 @@ def test_mtp_correctness(
     with monkeypatch.context() as m:
         m.setenv("VLLM_MLA_DISABLE", "1")
 
-        method, model_name, tp_size = model_setup
+        if len(model_setup) == 5:
+            (
+                method,
+                model_name,
+                tp_size,
+                draft_model,
+                num_speculative_tokens,
+            ) = model_setup
+        else:
+            method, model_name, tp_size = model_setup
+            draft_model = None
+            num_speculative_tokens = 1
         _skip_if_insufficient_gpus_for_tp(tp_size)
+
+        extra_kwargs: dict[str, Any] = {}
+        if "gemma-4" in model_name:
+            extra_kwargs["limit_mm_per_prompt"] = {
+                "image": 0,
+                "audio": 0,
+            }
+
+        if draft_model is not None and "gemma-4" in draft_model:
+            import transformers
+            from packaging.version import Version
+
+            if Version(transformers.__version__) < Version("5.8.0"):
+                pytest.skip(
+                    "Gemma4 MTP assistant requires transformers>=5.8.0, "
+                    f"got {transformers.__version__}"
+                )
 
         attn_backend = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
         ref_llm = LLM(
@@ -757,6 +796,7 @@ def test_mtp_correctness(
             tensor_parallel_size=tp_size,
             trust_remote_code=True,
             attention_backend=attn_backend,
+            **extra_kwargs,
         )
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         evaluate_llm_for_gsm8k(
@@ -766,17 +806,22 @@ def test_mtp_correctness(
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
 
+        speculative_config: dict[str, Any] = {
+            "method": method,
+            "num_speculative_tokens": num_speculative_tokens,
+            "max_model_len": 2048,
+        }
+        if draft_model is not None:
+            speculative_config["model"] = draft_model
+
         spec_llm = LLM(
             model=model_name,
             trust_remote_code=True,
             tensor_parallel_size=tp_size,
-            speculative_config={
-                "method": method,
-                "num_speculative_tokens": 1,
-                "max_model_len": 2048,
-            },
+            speculative_config=speculative_config,
             max_model_len=2048,
             attention_backend=attn_backend,
+            **extra_kwargs,
         )
         # MTP supports async scheduling; assert it is active by default.
         assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
