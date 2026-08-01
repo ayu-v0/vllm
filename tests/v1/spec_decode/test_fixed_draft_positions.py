@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest import mock
 
+import numpy as np
 import torch
 
 import vllm.v1.spec_decode.llm_base_proposer as proposer_module
+from vllm.config import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilder
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
@@ -21,6 +25,26 @@ class _Group:
 
 class _TritonBuilderSubclass(TritonAttentionMetadataBuilder):
     pass
+
+
+class _FakeCommonMetadata:
+    def __init__(self, batch_size: int):
+        self.seq_lens = torch.arange(1, batch_size + 1, dtype=torch.int32)
+        self.slot_mapping = torch.arange(batch_size, dtype=torch.int64)
+        self.block_table_tensor = torch.zeros(
+            (batch_size, 1), dtype=torch.int32
+        )
+        self.max_seq_len = batch_size
+        self._seq_lens_cpu = self.seq_lens.clone()
+        self._num_computed_tokens_cpu = self.seq_lens - 1
+        self.seq_lens_cpu_upper_bound = self.seq_lens.clone()
+        self.num_actual_tokens = batch_size
+        self.max_query_len = 1 if batch_size else 0
+        self.query_start_loc = torch.arange(batch_size + 1, dtype=torch.int32)
+        self.query_start_loc_cpu = self.query_start_loc.clone()
+
+    def batch_size(self) -> int:
+        return self.seq_lens.shape[0]
 
 
 def _bare_proposer(
@@ -40,6 +64,213 @@ def _bare_proposer(
     proposer.draft_uses_xdrope_dim = 0
     proposer.draft_attn_groups = []
     return proposer
+
+
+def _run_propose_harness(
+    monkeypatch,
+    constant_draft_positions: bool,
+    reuse_followup_metadata: bool,
+    input_batch_size: int = 4,
+    batch_size: int = 2,
+):
+    proposer = _bare_proposer(
+        constant_draft_positions=constant_draft_positions
+    )
+    num_input_tokens = 4 if batch_size else 0
+    token_indices_to_sample = (
+        torch.tensor([1, 3], dtype=torch.int64)
+        if batch_size
+        else torch.empty(0, dtype=torch.int64)
+    )
+    common_attn_metadata = _FakeCommonMetadata(batch_size)
+
+    proposer.method = "mtp"
+    proposer.num_speculative_tokens = 3
+    proposer.parallel_drafting = False
+    proposer.supports_mm_inputs = False
+    proposer.pass_hidden_states_to_model = False
+    proposer.allowed_attn_types = None
+    proposer.block_size = 16
+    proposer.max_model_len = 128
+    proposer.input_ids = torch.zeros(input_batch_size, dtype=torch.int32)
+    proposer.hidden_states = torch.zeros((input_batch_size, 1))
+    proposer.inputs_embeds = torch.zeros((input_batch_size, 1))
+    proposer._slot_mapping_buffer = torch.zeros(
+        input_batch_size, dtype=torch.int64
+    )
+    proposer._draft_attn_layer_names = ["layer.0"]
+    proposer.arange = torch.arange(input_batch_size + 1, dtype=torch.int32)
+    proposer.token_arange_np = np.arange(input_batch_size + 1)
+    proposer.vllm_config = mock.MagicMock()
+    proposer.positions[:input_batch_size].copy_(
+        torch.tensor([10, 20, 30, 40], dtype=torch.int64)
+    )
+
+    proposer.set_inputs_first_pass = mock.MagicMock(
+        return_value=(
+            num_input_tokens,
+            token_indices_to_sample,
+            common_attn_metadata,
+        )
+    )
+    initial_model_kwargs = {
+        "input_ids": proposer.input_ids[:num_input_tokens],
+        "positions": proposer.positions[:num_input_tokens],
+        "inputs_embeds": None,
+    }
+    proposer.build_model_inputs_first_pass = mock.MagicMock(
+        return_value=(initial_model_kwargs, num_input_tokens)
+    )
+    proposer._determine_batch_execution_and_padding = mock.MagicMock(
+        side_effect=[
+            (CUDAGraphMode.NONE, num_input_tokens, None),
+            (CUDAGraphMode.NONE, input_batch_size, None),
+        ]
+    )
+    proposer.build_per_group_and_layer_attn_metadata = mock.MagicMock(
+        return_value=([], {"layer.0": object()})
+    )
+    proposer._can_reuse_followup_attn_metadata = mock.MagicMock(
+        return_value=reuse_followup_metadata
+    )
+
+    def update_positions(
+        positions,
+        common_attn_metadata,
+        batch_size,
+        input_batch_size,
+        block_size,
+    ):
+        del common_attn_metadata, block_size
+        updated_positions = positions + 1
+        proposer.positions[:batch_size].copy_(updated_positions)
+        proposer.positions[batch_size:input_batch_size].zero_()
+        return updated_positions
+
+    update_mock = mock.MagicMock(side_effect=update_positions)
+    proposer._update_positions_dependent_metadata = update_mock
+    proposer.model_returns_tuple = mock.MagicMock(return_value=False)
+    proposer._greedy_sample = mock.MagicMock(
+        side_effect=[
+            offset + torch.arange(batch_size, dtype=torch.int64)
+            for offset in (101, 201, 301)
+        ]
+    )
+
+    seen_positions = []
+    model_outputs = [
+        torch.arange(num_input_tokens, dtype=torch.float32).unsqueeze(1),
+        torch.arange(input_batch_size, dtype=torch.float32).unsqueeze(1),
+        torch.arange(input_batch_size, dtype=torch.float32).unsqueeze(1),
+    ]
+
+    def run_model(**kwargs):
+        seen_positions.append(kwargs["positions"].clone())
+        return model_outputs[len(seen_positions) - 1]
+
+    proposer.model = mock.MagicMock(side_effect=run_model)
+    monkeypatch.setattr(
+        proposer_module,
+        "set_forward_context",
+        lambda *args, **kwargs: nullcontext(),
+    )
+
+    result = proposer.propose(
+        target_token_ids=torch.arange(num_input_tokens, dtype=torch.int64),
+        target_positions=proposer.positions[:num_input_tokens].clone(),
+        target_hidden_states=torch.zeros((num_input_tokens, 1)),
+        next_token_ids=torch.arange(batch_size, dtype=torch.int64),
+        token_indices_to_sample=token_indices_to_sample,
+        common_attn_metadata=common_attn_metadata,
+        sampling_metadata=mock.MagicMock(),
+    )
+    return (
+        proposer,
+        result,
+        common_attn_metadata,
+        seen_positions,
+        update_mock,
+    )
+
+
+def test_propose_constant_positions_rebuilds_each_followup_metadata(monkeypatch):
+    proposer, result, cad, seen_positions, update_mock = _run_propose_harness(
+        monkeypatch,
+        constant_draft_positions=True,
+        reuse_followup_metadata=False,
+    )
+
+    expected_positions = torch.tensor([20, 40, 0, 0], dtype=torch.int64)
+    torch.testing.assert_close(proposer.positions[:4], expected_positions)
+    for positions in seen_positions[1:]:
+        torch.testing.assert_close(positions, expected_positions)
+    update_mock.assert_not_called()
+    assert result.shape == (2, 3)
+    assert cad.max_seq_len == 2
+    assert proposer.build_per_group_and_layer_attn_metadata.call_args_list == [
+        mock.call(cad),
+        mock.call(cad, draft_index=1),
+        mock.call(cad, draft_index=2),
+    ]
+    proposer._can_reuse_followup_attn_metadata.assert_called_once_with()
+
+
+def test_propose_constant_positions_reuses_followup_metadata(monkeypatch):
+    proposer, result, cad, seen_positions, update_mock = _run_propose_harness(
+        monkeypatch,
+        constant_draft_positions=True,
+        reuse_followup_metadata=True,
+    )
+
+    expected_positions = torch.tensor([20, 40, 0, 0], dtype=torch.int64)
+    torch.testing.assert_close(proposer.positions[:4], expected_positions)
+    for positions in seen_positions[1:]:
+        torch.testing.assert_close(positions, expected_positions)
+    update_mock.assert_not_called()
+    assert result.shape == (2, 3)
+    assert proposer.build_per_group_and_layer_attn_metadata.call_args_list == [
+        mock.call(cad),
+        mock.call(cad, draft_index=1),
+    ]
+    proposer._can_reuse_followup_attn_metadata.assert_called_once_with()
+
+
+def test_propose_constant_positions_handles_empty_dp_rank(monkeypatch):
+    proposer, result, cad, seen_positions, update_mock = _run_propose_harness(
+        monkeypatch,
+        constant_draft_positions=True,
+        reuse_followup_metadata=True,
+        input_batch_size=4,
+        batch_size=0,
+    )
+
+    expected_positions = torch.zeros(4, dtype=torch.int64)
+    torch.testing.assert_close(proposer.positions[:4], expected_positions)
+    for positions in seen_positions[1:]:
+        torch.testing.assert_close(positions, expected_positions)
+    update_mock.assert_not_called()
+    assert result.shape == (0, 3)
+    assert cad.num_actual_tokens == 0
+    assert proposer.build_per_group_and_layer_attn_metadata.call_args_list == [
+        mock.call(cad),
+        mock.call(cad, draft_index=1),
+    ]
+
+
+def test_propose_normal_positions_preserves_updates(monkeypatch):
+    proposer, result, cad, _, update_mock = _run_propose_harness(
+        monkeypatch,
+        constant_draft_positions=False,
+        reuse_followup_metadata=False,
+    )
+
+    assert result.shape == (2, 3)
+    assert update_mock.call_count == 2
+    assert proposer.build_per_group_and_layer_attn_metadata.call_args_list == [
+        mock.call(cad),
+        mock.call(cad, draft_index=1),
+        mock.call(cad, draft_index=2),
+    ]
 
 
 def test_prepare_constant_draft_positions_compacts_and_zeros_padding():

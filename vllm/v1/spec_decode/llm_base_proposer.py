@@ -566,6 +566,10 @@ class SpecDecodeBaseProposer:
         cudagraph_runtime_mode, input_batch_size, batch_size_across_dp = (
             self._determine_batch_execution_and_padding(batch_size)
         )
+        if self.constant_draft_positions:
+            self._prepare_constant_draft_positions(
+                positions, batch_size, input_batch_size
+            )
 
         common_attn_metadata.num_actual_tokens = batch_size
         common_attn_metadata.max_query_len = 1
@@ -586,23 +590,30 @@ class SpecDecodeBaseProposer:
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."
+        reuse_followup_attn_metadata = (
+            self._can_reuse_followup_attn_metadata()
+        )
         for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
             input_ids = draft_token_ids_list[-1].int()
-            positions = self._update_positions_dependent_metadata(
-                positions,
-                common_attn_metadata,
-                batch_size,
-                input_batch_size,
-                block_size,
-            )
+            if not self.constant_draft_positions:
+                positions = self._update_positions_dependent_metadata(
+                    positions,
+                    common_attn_metadata,
+                    batch_size,
+                    input_batch_size,
+                    block_size,
+                )
 
             # Rebuild attention metadata
-            _, per_layer_attn_metadata = self.build_per_group_and_layer_attn_metadata(
-                common_attn_metadata, draft_index=token_index + 1
-            )
+            if not reuse_followup_attn_metadata or token_index == 0:
+                _, per_layer_attn_metadata = (
+                    self.build_per_group_and_layer_attn_metadata(
+                        common_attn_metadata, draft_index=token_index + 1
+                    )
+                )
 
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
