@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from pathlib import Path
 
 ROOT = Path(__file__).parents[3]
@@ -78,14 +81,11 @@ def test_core_gpu_runner_uses_core_gemma4_proposer():
         "EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer"
         in shared_core_drafter_branch
     )
-    assert (
-        "draft_token_ids = self.drafter.propose(" in shared_core_drafter_branch
-    )
+    assert "draft_token_ids = self.drafter.propose(" in shared_core_drafter_branch
     assert 'self.method == "mtp"' in use_gemma4_mtp_method
     assert '== "gemma4_mtp"' in use_gemma4_mtp_method
     assert (
-        'return self.method in ("eagle", "eagle3", "mtp", "dflash")'
-        in use_eagle_method
+        'return self.method in ("eagle", "eagle3", "mtp", "dflash")' in use_eagle_method
     )
 
 

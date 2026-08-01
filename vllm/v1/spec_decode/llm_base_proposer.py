@@ -590,9 +590,7 @@ class SpecDecodeBaseProposer:
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."
-        reuse_followup_attn_metadata = (
-            self._can_reuse_followup_attn_metadata()
-        )
+        reuse_followup_attn_metadata = self._can_reuse_followup_attn_metadata()
         for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
@@ -692,9 +690,7 @@ class SpecDecodeBaseProposer:
         common_attn_metadata.slot_mapping = self._slot_mapping_buffer[:batch_size]
 
         if self.uses_mrope:
-            self.mrope_positions[1:, :batch_size] = self.mrope_positions[
-                0, :batch_size
-            ]
+            self.mrope_positions[1:, :batch_size] = self.mrope_positions[0, :batch_size]
             positions = self.mrope_positions[:, :batch_size]
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
             self.xdrope_positions[1:, :batch_size] = self.xdrope_positions[

@@ -32,9 +32,7 @@ class _FakeCommonMetadata:
     def __init__(self, batch_size: int):
         self.seq_lens = torch.arange(1, batch_size + 1, dtype=torch.int32)
         self.slot_mapping = torch.arange(batch_size, dtype=torch.int64)
-        self.block_table_tensor = torch.zeros(
-            (batch_size, 1), dtype=torch.int32
-        )
+        self.block_table_tensor = torch.zeros((batch_size, 1), dtype=torch.int32)
         self.max_seq_len = batch_size
         self._seq_lens_cpu = self.seq_lens.clone()
         self._num_computed_tokens_cpu = self.seq_lens - 1
@@ -113,9 +111,7 @@ def _run_propose_harness(
     input_batch_size: int = 4,
     batch_size: int = 2,
 ):
-    proposer = _bare_proposer(
-        constant_draft_positions=constant_draft_positions
-    )
+    proposer = _bare_proposer(constant_draft_positions=constant_draft_positions)
     num_input_tokens = 4 if batch_size else 0
     token_indices_to_sample = (
         torch.tensor([1, 3], dtype=torch.int64)
@@ -135,9 +131,7 @@ def _run_propose_harness(
     proposer.input_ids = torch.zeros(input_batch_size, dtype=torch.int32)
     proposer.hidden_states = torch.zeros((input_batch_size, 1))
     proposer.inputs_embeds = torch.zeros((input_batch_size, 1))
-    proposer._slot_mapping_buffer = torch.zeros(
-        input_batch_size, dtype=torch.int64
-    )
+    proposer._slot_mapping_buffer = torch.zeros(input_batch_size, dtype=torch.int64)
     proposer._draft_attn_layer_names = ["layer.0"]
     proposer.arange = torch.arange(input_batch_size + 1, dtype=torch.int32)
     proposer.token_arange_np = np.arange(input_batch_size + 1)
@@ -398,9 +392,7 @@ def test_cannot_reuse_followup_attn_metadata_without_draft_groups():
 
 def test_cannot_reuse_followup_attn_metadata_for_triton_subclass():
     proposer = _bare_proposer()
-    proposer.draft_attn_groups = [
-        _Group(object.__new__(_TritonBuilderSubclass))
-    ]
+    proposer.draft_attn_groups = [_Group(object.__new__(_TritonBuilderSubclass))]
 
     assert not proposer._can_reuse_followup_attn_metadata()
 
@@ -453,9 +445,7 @@ def test_update_positions_dependent_metadata_preserves_normal_behavior(
         del block_table_tensor, block_size, max_model_len
         batch_size = positions_1d.shape[0]
         out_clamped_positions.copy_(positions_1d + 1)
-        out_slot_mapping[:batch_size].copy_(
-            torch.tensor([101, 202], dtype=torch.int64)
-        )
+        out_slot_mapping[:batch_size].copy_(torch.tensor([101, 202], dtype=torch.int64))
         out_slot_mapping[batch_size:input_batch_size].fill_(-1)
         seq_lens.add_(1)
 
