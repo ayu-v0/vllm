@@ -113,6 +113,7 @@ def _run_propose_harness(
     reuse_followup_metadata: bool,
     input_batch_size: int = 4,
     batch_size: int = 2,
+    num_speculative_tokens: int = 3,
 ):
     proposer = _bare_proposer(constant_draft_positions=constant_draft_positions)
     num_input_tokens = 4 if batch_size else 0
@@ -124,7 +125,7 @@ def _run_propose_harness(
     common_attn_metadata = _FakeCommonMetadata(batch_size)
 
     proposer.method = "mtp"
-    proposer.num_speculative_tokens = 3
+    proposer.num_speculative_tokens = num_speculative_tokens
     proposer.parallel_drafting = False
     proposer.supports_mm_inputs = False
     proposer.pass_hidden_states_to_model = False
@@ -307,6 +308,27 @@ def test_propose_normal_positions_preserves_updates(monkeypatch):
         mock.call(cad),
         mock.call(cad, draft_index=1),
         mock.call(cad, draft_index=2),
+    ]
+
+
+def test_propose_k1_returns_before_followup_position_and_metadata_logic(monkeypatch):
+    proposer, result, cad, seen_positions, update_mock = _run_propose_harness(
+        monkeypatch,
+        constant_draft_positions=True,
+        reuse_followup_metadata=True,
+        num_speculative_tokens=1,
+    )
+
+    assert result.shape == (2, 1)
+    assert len(seen_positions) == 1
+    torch.testing.assert_close(
+        proposer.positions[:4],
+        torch.tensor([10, 20, 30, 40], dtype=torch.int64),
+    )
+    update_mock.assert_not_called()
+    proposer._can_reuse_followup_attn_metadata.assert_not_called()
+    assert proposer.build_per_group_and_layer_attn_metadata.call_args_list == [
+        mock.call(cad)
     ]
 
 

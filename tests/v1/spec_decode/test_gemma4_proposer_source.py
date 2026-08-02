@@ -50,6 +50,17 @@ def test_core_base_consumes_constant_draft_position_contract():
     assert "if not reuse_followup_attn_metadata or token_index == 0:" in source
 
 
+def test_gemma4_enables_constant_draft_positions():
+    source = GEMMA_SOURCE.read_text(encoding="utf-8")
+    constructor = _source_between(
+        source,
+        "class Gemma4Proposer(SpecDecodeBaseProposer):",
+        "\n    def set_per_group_block_table(",
+    )
+
+    assert "self.constant_draft_positions = True" in constructor
+
+
 def test_core_gpu_runner_uses_core_gemma4_proposer():
     source = GPU_RUNNER_SOURCE.read_text(encoding="utf-8")
     speculative_config_source = SPECULATIVE_CONFIG_SOURCE.read_text(encoding="utf-8")
@@ -97,4 +108,5 @@ if __name__ == "__main__":
     test_gemma4_per_group_metadata_keeps_slot_mapping_with_block_table()
     test_gpu_runner_passes_matching_slot_mapping_to_gemma4_proposer()
     test_core_base_consumes_constant_draft_position_contract()
+    test_gemma4_enables_constant_draft_positions()
     test_core_gpu_runner_uses_core_gemma4_proposer()
