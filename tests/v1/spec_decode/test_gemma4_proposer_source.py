@@ -12,6 +12,9 @@ GEMMA_SOURCE = ROOT / "vllm" / "v1" / "spec_decode" / "gemma4.py"
 BASE_SOURCE = ROOT / "vllm" / "v1" / "spec_decode" / "llm_base_proposer.py"
 GPU_RUNNER_SOURCE = ROOT / "vllm" / "v1" / "worker" / "gpu_model_runner.py"
 SPECULATIVE_CONFIG_SOURCE = ROOT / "vllm" / "config" / "speculative.py"
+SPEC_DECODE_E2E_SOURCE = (
+    ROOT / "tests" / "v1" / "e2e" / "spec_decode" / "test_spec_decode.py"
+)
 
 
 def _source_between(source: str, start: str, end: str) -> str:
@@ -59,6 +62,20 @@ def test_gemma4_enables_constant_draft_positions():
     )
 
     assert "self.constant_draft_positions = True" in constructor
+
+
+def test_gemma4_e2e_accepts_model_and_parallelism_environment_overrides():
+    source = SPEC_DECODE_E2E_SOURCE.read_text(encoding="utf-8")
+
+    assert "def _get_gemma4_mtp_test_case(" in source
+    assert "VLLM_TEST_GEMMA4_TARGET_MODEL" in source
+    assert "VLLM_TEST_GEMMA4_DRAFT_MODEL" in source
+    assert "VLLM_TEST_GEMMA4_TP_SIZE" in source
+    assert "VLLM_TEST_GEMMA4_NUM_SPEC_TOKENS" in source
+    assert "gemma4-custom" in source
+    assert "is_gemma4_mtp = model_setup == _GEMMA4_MTP_TEST_CASE[0]" in source
+    assert '_GEMMA4_MTP_TEST_ID == "gemma4-e4b"' in source
+    assert "current_platform.device_count() > 1" in source
 
 
 def test_core_gpu_runner_uses_core_gemma4_proposer():
@@ -109,4 +126,5 @@ if __name__ == "__main__":
     test_gpu_runner_passes_matching_slot_mapping_to_gemma4_proposer()
     test_core_base_consumes_constant_draft_position_contract()
     test_gemma4_enables_constant_draft_positions()
+    test_gemma4_e2e_accepts_model_and_parallelism_environment_overrides()
     test_core_gpu_runner_uses_core_gemma4_proposer()

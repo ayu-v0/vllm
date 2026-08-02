@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import random
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -28,6 +29,91 @@ from vllm.platforms import current_platform
 from vllm.v1.metrics.reader import Metric
 
 MTP_SIMILARITY_RATE = 0.8
+
+_GEMMA4_TARGET_MODEL_ENV = "VLLM_TEST_GEMMA4_TARGET_MODEL"
+_GEMMA4_DRAFT_MODEL_ENV = "VLLM_TEST_GEMMA4_DRAFT_MODEL"
+_GEMMA4_TP_SIZE_ENV = "VLLM_TEST_GEMMA4_TP_SIZE"
+_GEMMA4_NUM_SPEC_TOKENS_ENV = "VLLM_TEST_GEMMA4_NUM_SPEC_TOKENS"
+
+
+def _read_positive_int_env(name: str, default: int) -> int:
+    """Read a positive integer test override from the environment."""
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be a positive integer, got {raw_value!r}"
+        ) from exc
+    if value < 1:
+        raise ValueError(f"{name} must be a positive integer, got {raw_value!r}")
+    return value
+
+
+def _get_gemma4_mtp_test_case() -> tuple[
+    tuple[tuple[str, str, int, str, int], bool, float],
+    str,
+]:
+    """Build the Gemma4 MTP E2E case from optional environment overrides."""
+    target_override = os.getenv(_GEMMA4_TARGET_MODEL_ENV)
+    draft_override = os.getenv(_GEMMA4_DRAFT_MODEL_ENV)
+    if (target_override is None) != (draft_override is None):
+        raise ValueError(
+            f"{_GEMMA4_TARGET_MODEL_ENV} and {_GEMMA4_DRAFT_MODEL_ENV} "
+            "must be set together"
+        )
+
+    target_model = (
+        "google/gemma-4-E4B-it" if target_override is None else target_override
+    )
+    draft_model = (
+        "google/gemma-4-E4B-it-assistant"
+        if draft_override is None
+        else draft_override
+    )
+    if not target_model.strip():
+        raise ValueError(f"{_GEMMA4_TARGET_MODEL_ENV} must not be empty")
+    if not draft_model.strip():
+        raise ValueError(f"{_GEMMA4_DRAFT_MODEL_ENV} must not be empty")
+
+    tp_size = _read_positive_int_env(_GEMMA4_TP_SIZE_ENV, 1)
+    num_speculative_tokens = _read_positive_int_env(
+        _GEMMA4_NUM_SPEC_TOKENS_ENV,
+        3,
+    )
+    custom_config = any(
+        name in os.environ
+        for name in (
+            _GEMMA4_TARGET_MODEL_ENV,
+            _GEMMA4_DRAFT_MODEL_ENV,
+            _GEMMA4_TP_SIZE_ENV,
+            _GEMMA4_NUM_SPEC_TOKENS_ENV,
+        )
+    )
+    return (
+        (
+            (
+                "mtp",
+                target_model,
+                tp_size,
+                draft_model,
+                num_speculative_tokens,
+            ),
+            False,
+            0.50,
+        ),
+        (
+            f"gemma4-custom-tp{tp_size}-k{num_speculative_tokens}"
+            if custom_config
+            else "gemma4-e4b"
+        ),
+    )
+
+
+_GEMMA4_MTP_TEST_CASE, _GEMMA4_MTP_TEST_ID = _get_gemma4_mtp_test_case()
 
 
 class AsyncSchedulingNotEnabledError(AssertionError):
@@ -718,26 +804,99 @@ def test_eagle_correctness_heavy(
     )
 
 
+@pytest.mark.skip_global_cleanup
+def test_gemma4_mtp_test_case_uses_defaults(monkeypatch: pytest.MonkeyPatch):
+    for name in (
+        _GEMMA4_TARGET_MODEL_ENV,
+        _GEMMA4_DRAFT_MODEL_ENV,
+        _GEMMA4_TP_SIZE_ENV,
+        _GEMMA4_NUM_SPEC_TOKENS_ENV,
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    test_case, test_id = _get_gemma4_mtp_test_case()
+
+    assert test_case == (
+        (
+            "mtp",
+            "google/gemma-4-E4B-it",
+            1,
+            "google/gemma-4-E4B-it-assistant",
+            3,
+        ),
+        False,
+        0.50,
+    )
+    assert test_id == "gemma4-e4b"
+
+
+@pytest.mark.skip_global_cleanup
+def test_gemma4_mtp_test_case_accepts_environment_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv(_GEMMA4_TARGET_MODEL_ENV, "/models/Gemma4-31B-W4A16")
+    monkeypatch.setenv(
+        _GEMMA4_DRAFT_MODEL_ENV,
+        "/models/Gemma4-31B-W4A16-assistant",
+    )
+    monkeypatch.setenv(_GEMMA4_TP_SIZE_ENV, "2")
+    monkeypatch.setenv(_GEMMA4_NUM_SPEC_TOKENS_ENV, "4")
+
+    test_case, test_id = _get_gemma4_mtp_test_case()
+
+    assert test_case == (
+        (
+            "mtp",
+            "/models/Gemma4-31B-W4A16",
+            2,
+            "/models/Gemma4-31B-W4A16-assistant",
+            4,
+        ),
+        False,
+        0.50,
+    )
+    assert test_id == "gemma4-custom-tp2-k4"
+
+
+@pytest.mark.skip_global_cleanup
+def test_gemma4_mtp_test_case_rejects_invalid_environment(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv(_GEMMA4_TARGET_MODEL_ENV, "")
+    monkeypatch.setenv(_GEMMA4_DRAFT_MODEL_ENV, "/models/draft")
+    with pytest.raises(ValueError, match=_GEMMA4_TARGET_MODEL_ENV):
+        _get_gemma4_mtp_test_case()
+
+    monkeypatch.setenv(_GEMMA4_TARGET_MODEL_ENV, "/models/target")
+    monkeypatch.delenv(_GEMMA4_DRAFT_MODEL_ENV, raising=False)
+    with pytest.raises(ValueError, match="must be set together"):
+        _get_gemma4_mtp_test_case()
+
+    monkeypatch.setenv(_GEMMA4_DRAFT_MODEL_ENV, "/models/draft")
+    monkeypatch.setenv(_GEMMA4_TP_SIZE_ENV, "0")
+    with pytest.raises(ValueError, match=_GEMMA4_TP_SIZE_ENV):
+        _get_gemma4_mtp_test_case()
+
+    monkeypatch.setenv(_GEMMA4_TP_SIZE_ENV, "1")
+    monkeypatch.setenv(_GEMMA4_NUM_SPEC_TOKENS_ENV, "invalid")
+    with pytest.raises(ValueError, match=_GEMMA4_NUM_SPEC_TOKENS_ENV):
+        _get_gemma4_mtp_test_case()
+
+
 @pytest.mark.parametrize(
     ["model_setup", "mm_enabled", "expected_accuracy_threshold"],
     [
         (("mtp", "XiaomiMiMo/MiMo-7B-Base", 1), False, 0.5),  # ref: 65%-70%
         (("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1), False, 0.0),  # dummy model
-        (
-            (
-                "mtp",
-                "google/gemma-4-E4B-it",
-                1,
-                "google/gemma-4-E4B-it-assistant",
-                3,
-            ),
-            False,
-            0.50,
-        ),
+        _GEMMA4_MTP_TEST_CASE,
     ],
-    ids=["mimo", "deepseek", "gemma4-e4b"],
+    ids=["mimo", "deepseek", _GEMMA4_MTP_TEST_ID],
 )
-@single_gpu_only
+@pytest.mark.skipif(
+    _GEMMA4_MTP_TEST_ID == "gemma4-e4b"
+    and current_platform.device_count() > 1,
+    reason="Default MTP correctness cases run only on single-device hosts.",
+)
 @large_gpu_mark(min_gb=20)
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,
@@ -770,16 +929,23 @@ def test_mtp_correctness(
             method, model_name, tp_size = model_setup
             draft_model = None
             num_speculative_tokens = 1
+        is_gemma4_mtp = model_setup == _GEMMA4_MTP_TEST_CASE[0]
+        if is_gemma4_mtp:
+            print(
+                "Gemma4 MTP test config: "
+                f"target={model_name}, draft={draft_model}, "
+                f"tp={tp_size}, k={num_speculative_tokens}"
+            )
         _skip_if_insufficient_gpus_for_tp(tp_size)
 
         extra_kwargs: dict[str, Any] = {}
-        if "gemma-4" in model_name:
+        if is_gemma4_mtp:
             extra_kwargs["limit_mm_per_prompt"] = {
                 "image": 0,
                 "audio": 0,
             }
 
-        if draft_model is not None and "gemma-4" in draft_model:
+        if is_gemma4_mtp:
             import transformers
             from packaging.version import Version
 
