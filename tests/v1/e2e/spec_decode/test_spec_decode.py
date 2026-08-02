@@ -114,6 +114,14 @@ def _get_gemma4_mtp_test_case() -> tuple[
 
 
 _GEMMA4_MTP_TEST_CASE, _GEMMA4_MTP_TEST_ID = _get_gemma4_mtp_test_case()
+_GEMMA4_MTP_RESOURCE_MARK = (
+    large_gpu_mark(min_gb=20)
+    if _GEMMA4_MTP_TEST_ID == "gemma4-e4b"
+    else pytest.mark.skipif(
+        False,
+        reason="Custom Gemma4 resources are validated by runtime initialization.",
+    )
+)
 
 
 class AsyncSchedulingNotEnabledError(AssertionError):
@@ -897,7 +905,7 @@ def test_gemma4_mtp_test_case_rejects_invalid_environment(
     and current_platform.device_count() > 1,
     reason="Default MTP correctness cases run only on single-device hosts.",
 )
-@large_gpu_mark(min_gb=20)
+@_GEMMA4_MTP_RESOURCE_MARK
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,

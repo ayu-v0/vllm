@@ -76,6 +76,7 @@ def test_gemma4_e2e_accepts_model_and_parallelism_environment_overrides():
     assert "is_gemma4_mtp = model_setup == _GEMMA4_MTP_TEST_CASE[0]" in source
     assert '_GEMMA4_MTP_TEST_ID == "gemma4-e4b"' in source
     assert "current_platform.device_count() > 1" in source
+    assert "_GEMMA4_MTP_RESOURCE_MARK = (" in source
 
 
 def test_core_gpu_runner_uses_core_gemma4_proposer():
