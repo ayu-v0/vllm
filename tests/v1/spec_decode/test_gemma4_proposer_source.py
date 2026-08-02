@@ -3,6 +3,10 @@
 
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.skip_global_cleanup
+
 ROOT = Path(__file__).parents[3]
 GEMMA_SOURCE = ROOT / "vllm" / "v1" / "spec_decode" / "gemma4.py"
 BASE_SOURCE = ROOT / "vllm" / "v1" / "spec_decode" / "llm_base_proposer.py"

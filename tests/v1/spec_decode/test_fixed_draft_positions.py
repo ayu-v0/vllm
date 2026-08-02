@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+import pytest
 import torch
 
 import vllm.v1.spec_decode.llm_base_proposer as proposer_module
@@ -14,6 +15,8 @@ from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilder
 from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 class _Group:
