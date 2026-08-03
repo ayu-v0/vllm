@@ -66,6 +66,11 @@ def test_gemma4_enables_constant_draft_positions():
 
 def test_gemma4_e2e_accepts_model_and_parallelism_environment_overrides():
     source = SPEC_DECODE_E2E_SOURCE.read_text(encoding="utf-8")
+    mtp_correctness = _source_between(
+        source,
+        "\ndef test_mtp_correctness(",
+        "\n\n@dataclass",
+    )
 
     assert "def _get_gemma4_mtp_test_case(" in source
     assert "VLLM_TEST_GEMMA4_TARGET_MODEL" in source
@@ -77,6 +82,7 @@ def test_gemma4_e2e_accepts_model_and_parallelism_environment_overrides():
     assert '_GEMMA4_MTP_TEST_ID == "gemma4-e4b"' in source
     assert "current_platform.device_count() > 1" in source
     assert "_GEMMA4_MTP_RESOURCE_MARK = (" in source
+    assert 'extra_kwargs["language_model_only"] = True' in mtp_correctness
 
 
 def test_core_gpu_runner_uses_core_gemma4_proposer():

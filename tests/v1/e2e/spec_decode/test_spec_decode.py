@@ -948,10 +948,7 @@ def test_mtp_correctness(
 
         extra_kwargs: dict[str, Any] = {}
         if is_gemma4_mtp:
-            extra_kwargs["limit_mm_per_prompt"] = {
-                "image": 0,
-                "audio": 0,
-            }
+            extra_kwargs["language_model_only"] = True
 
         if is_gemma4_mtp:
             import transformers
